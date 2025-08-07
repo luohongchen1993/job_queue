@@ -72,11 +72,10 @@ def main():
                 return
                 
             print(f"{'ID':<8} {'Name':<20} {'Status':<10} {'Command'}")
-            print("-" * 60)
+            print("-" * 80)
             for job in jobs:
                 name = job['name'][:18] + '..' if len(job['name']) > 20 else job['name']
-                command = job['command'][:25] + '..' if len(job['command']) > 27 else job['command']
-                print(f"{job['id']:<8} {name:<20} {job['status']:<10} {command}")
+                print(f"{job['id']:<8} {name:<20} {job['status']:<10} {job['command']}")
                 
     elif args.command == 'remove':
         if jq.remove_job(args.job_id):
