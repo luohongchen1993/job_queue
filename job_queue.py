@@ -84,7 +84,8 @@ class JobQueue:
                 "started_at": None,
                 "completed_at": None,
                 "exit_code": None,
-                "pid": None
+                "pid": None,
+                "stop_requested": False
             }
             
             jobs.append(job)
@@ -115,69 +116,13 @@ class JobQueue:
             return False
     
     def stop_job(self, job_id: str) -> bool:
-        with self.lock:
-            if job_id in self.running_processes:
-                process = self.running_processes[job_id]
-                try:
-                    process.terminate()
-                    # Give it a moment to terminate gracefully
-                    try:
-                        process.wait(timeout=5)
-                    except subprocess.TimeoutExpired:
-                        # Force kill if it doesn't terminate
-                        process.kill()
-                        process.wait()
-                    
-                    del self.running_processes[job_id]
-                    
-                    # Update job status
-                    self._update_job(job_id, {
-                        "status": "stopped",
-                        "completed_at": datetime.now().isoformat(),
-                        "exit_code": -15,  # SIGTERM
-                        "pid": None
-                    })
-                    
-                    # Write log file
-                    stopped_job = self.get_job(job_id)
-                    if stopped_job:
-                        self._write_job_log(stopped_job, "", "Job was stopped by user")
-                    
-                    self._log(f"Stopped job {job_id}")
-                    return True
-                    
-                except Exception as e:
-                    self._log(f"Error stopping job {job_id}: {e}")
-                    return False
-            
-            # Check if job is running but not in our process dict (orphaned process)
-            job = self.get_job(job_id)
-            if job and job["status"] == "running" and job.get("pid"):
-                try:
-                    pid = job["pid"]
-                    # Brute force kill - kill process and all its children
-                    subprocess.run(["pkill", "-KILL", "-P", str(pid)], check=False)  # Kill children first
-                    subprocess.run(["kill", "-KILL", str(pid)], check=False)  # Kill parent
-                    
-                    # Update job status
-                    self._update_job(job_id, {
-                        "status": "stopped",
-                        "completed_at": datetime.now().isoformat(),
-                        "exit_code": -15,
-                        "pid": None
-                    })
-                    
-                    # Write log file
-                    self._write_job_log(job, "", "Job was stopped by user")
-                    
-                    self._log(f"Stopped job {job_id} (PID: {pid})")
-                    return True
-                    
-                except Exception as e:
-                    self._log(f"Error stopping job {job_id}: {e}")
-                    return False
-                
-            return False
+        # Simply mark the job for stopping - let worker handle the actual killing
+        job = self.get_job(job_id)
+        if job and job["status"] in ["pending", "running"]:
+            self._update_job(job_id, {"stop_requested": True})
+            print(f"Stop requested for job {job_id}")
+            return True
+        return False
     
     def _update_job(self, job_id: str, updates: Dict) -> None:
         with self.lock:
@@ -216,7 +161,42 @@ class JobQueue:
                     # Store PID in job data for persistence
                     self._update_job(job_id, {"pid": process.pid})
                     
-                    # Wait for completion
+                    # Wait for completion while checking for stop requests
+                    stdout = ""
+                    stderr = ""
+                    while process.poll() is None:  # While process is still running
+                        # Check if stop was requested
+                        current_job = self.get_job(job_id)
+                        if current_job and current_job.get("stop_requested"):
+                            # Kill the process immediately
+                            pid = process.pid
+                            subprocess.run(["pkill", "-KILL", "-P", str(pid)], check=False)
+                            subprocess.run(["kill", "-KILL", str(pid)], check=False)
+                            process.kill()
+                            
+                            # Remove from running processes
+                            if job_id in self.running_processes:
+                                del self.running_processes[job_id]
+                            
+                            self._update_job(job_id, {
+                                "status": "stopped",
+                                "completed_at": datetime.now().isoformat(),
+                                "exit_code": -15,
+                                "pid": None,
+                                "stop_requested": False
+                            })
+                            
+                            # Write log file
+                            updated_job = self.get_job(job_id)
+                            if updated_job:
+                                self._write_job_log(updated_job, "", "Job was stopped by user")
+                            
+                            self._log(f"Stopped job {job_id}")
+                            return True
+                        
+                        time.sleep(0.1)  # Check every 100ms
+                    
+                    # Process finished normally, get output
                     stdout, stderr = process.communicate()
                     exit_code = process.returncode
                     
@@ -269,6 +249,18 @@ class JobQueue:
         self._log("Worker started")
         while True:
             if not self.run_next_job():
+                # Check for pending jobs that need to be cancelled
+                jobs = self._load_queue()
+                for job in jobs:
+                    if job.get("stop_requested") and job["status"] == "pending":
+                        self._update_job(job["id"], {
+                            "status": "stopped",
+                            "completed_at": datetime.now().isoformat(),
+                            "exit_code": -1,
+                            "stop_requested": False
+                        })
+                        self._log(f"Cancelled pending job {job['id']}")
+                
                 time.sleep(1)
     
     def start_worker(self) -> None:
