@@ -33,3 +33,8 @@ echo "[wait_then_run.sh] wait PID: $target_pid | job PID: $watcher_pid | job com
 # also dump to log file
 echo "[wait_then_run.sh] wait PID: $target_pid | job PID: $watcher_pid | job command: $post_command" >> /root/experiments/job_queue/jobs.log 2>&1
 
+# can put in ~/.bashrc
+# wait_then_run() {
+#  bash /root/experiments/job_queue/run_job.sh "$@"
+# }
+
